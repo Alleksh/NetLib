@@ -7,7 +7,9 @@
 #include <string>
 #include <vector>
 #include <thread>
-
+#include <iostream>
+#include <mutex>
+//структура дл€ запросов
 struct request
 {
 	std::string source;
@@ -18,83 +20,92 @@ struct request
 		SourceToMap(source, Map);
 	}
 	request() {}
-	static void SourceToMap(std::string& source, std::map<std::string, std::string>& Map)
-	{
-		int i = 0;
-		while (i < source.size())
-		{
-			std::pair<std::string, std::string> pair;
-			while (i < source.size() && source[i] != ':')
-			{
-				pair.first += source[i];
-				i++;
-			}
-			i++;
-			while (i < source.size() && source[i] != '\n')
-			{
-				pair.second += source[i];
-				i++;
-			}i++;
-			Map.emplace(pair.first, pair.second);
-		}
-	}
+	static void SourceToMap(std::string& source, std::map<std::string, std::string>& Map);
 };
 #ifdef SERVER
 #else
 void AutoSendFunc(
-	bool& CloseThreads,
+	int* CloseThreads,
 	char* Request,
 	int delay,
 	void(*ProcessFunc)(request),
-	void(*sendRequest)(char*&, char*))
-{
-	while (!CloseThreads)
-	{
-		char* ptr;
-		sendRequest(ptr, Request);
-		ProcessFunc(request(std::string(ptr)));
-		std::this_thread::sleep_for(std::chrono::milliseconds(50));
-		delete ptr;
-	}
-}
+	void(*sendRequest)(char*&, char*));
 void GetSendAutoFunc(
-	bool& CloseThreads,
+	int* CloseThreads,
 	int delay,
 	void(*getFunc)(char*&),
 	void(*ProcessFunc)(request),
-	void(*sendRequest)(char*&, char*))
+	void(*sendRequest)(char*&, char*));
+// —труктура дл€ взаимодействи€ с потоками
+struct ThreadInteraction
 {
-	if (ProcessFunc != NULL)
+public:
+	int ptr, myItr;
+	//(void)(NET::*deleteFunc)(unsigned int);
+	ThreadInteraction(){}
+	void pause()
 	{
-		while (!CloseThreads)
-		{
-			char *ptr, *ptr2;
-			getFunc(ptr2);
-			sendRequest(ptr, ptr2);
-			ProcessFunc(request(std::string(ptr)));
-			std::this_thread::sleep_for(std::chrono::milliseconds(50));
-			delete ptr;
-			delete ptr2;
-		}
+		ptr = 2;
 	}
-	else
+	void unPause()
 	{
-		while (!CloseThreads)
-		{
-			char *ptr, *ptr2;
-			getFunc(ptr2);
-			sendRequest(ptr, ptr2);
-			std::this_thread::sleep_for(std::chrono::milliseconds(50));
-			delete ptr;
-			delete ptr2;
-		}
+		ptr = 1;
 	}
-}
+	void close()
+	{
+		ptr = 0;
+		std::this_thread::sleep_for(std::chrono::seconds(1));
+		//(*net).(*deleteFunc)(myItr);
+	}
+	int state()
+	{
+		return ptr;
+	}
+};
+struct ThreadInteraction2
+{
+private:
+	ThreadInteraction *ti;
+public:
+	void pause()
+	{
+		ti->ptr = 2;
+	}
+	void unPause()
+	{
+		ti->ptr = 1;
+	}
+	void close()
+	{
+		ti->close();
+	}
+	int state()
+	{
+		return ti->ptr;
+	}
+	ThreadInteraction2(ThreadInteraction& ti)
+	{
+		this->ti = &ti;
+	}
+};
+struct RequestStruct
+{
+	ThreadInteraction TI;
+	std::string Request;
+	void(*func)(request);
+	int delay;
+	RequestStruct() {}
+};
+struct GSRequestStruct
+{
+	ThreadInteraction TI;
+	void(*getFunc)(char*&);
+	void(*sendFunc)(request);
+	int delay;
+	GSRequestStruct() {}
+};
 #endif
-void sendRequest(char*& recvdest, char*send)
-{
-
-}
+void sendRequest(char*& recvdest, char*send);
 class NET
 {
 private:
@@ -103,45 +114,31 @@ public:
 
 #else
 private:
-	std::vector<std::pair<
-		std::pair
-			<std::string,
-			int>,
-		void(*)(request)>> Requests;
-		
-	
-	std::vector <std::pair<
-		int,
-		std::pair
-			<void(*)(char*&), 
-			void(*)(request)>>> 
-		GSRequests;
-	bool CloseThreads = 0;;
+	std::vector<RequestStruct> Requests;
+	std::mutex RequestsMutex;
+	void deleteRequestsElement(unsigned int _Val)
+	{
+		if (_Val >= Requests.size()) return;
+		Requests.erase(Requests.begin() + _Val);
+		for (unsigned int i = _Val; i < Requests.size(); i++)
+			Requests[i].TI.myItr = i;// or Requests[i].TI.myItr--;
+	}
+	std::vector <GSRequestStruct> GSRequests;
+	std::mutex GSRequestsMutex;
+	void deleteGSRequestsElement(unsigned int _Val)
+	{
+		if (_Val >= GSRequests.size()) return;
+		GSRequests.erase(GSRequests.begin() + _Val);
+		for (unsigned int i = _Val; i < Requests.size(); i++)
+			GSRequests[i].TI.myItr = i;// or Requests[i].TI.myItr--;
+	}
 public:
-	void addSendAutoFunc(std::string Request, void(*func)(request), int delay)
+	~NET()
 	{
-		Requests.push_back(
-			std::pair<
-			std::pair <std::string,int>,						void(*)(request)>
-			(std::pair<std::string,int>(Request, delay),		func));
 	}
-	void addGetSendAutoFunc(void(*get)(char*&), void(*send)(request), int delay)
-	{
-		GSRequests.push_back(
-			std::pair<
-			int, std::pair<void(*)(char*&), void(*)(request)>>
-			(delay, std::pair<void(*)(char*&), void(*)(request)>(get, send)));
-	}
-	void Initialize()
-	{
-		for (int i = 0; i < Requests.size(); i++)
-		{
-#define Request Requests[i].first.first
-			char* request = new char[Request.size()+1];
-			memcpy(request, Request.c_str(), Request.size());
-			request[Request.size()] = 0;
-#undef Request
-		}
-	}
+	ThreadInteraction2* addSendAutoFunc(std::string Request, void(*func)(request), int delay);
+	ThreadInteraction2* addGetSendAutoFunc(void(*get)(char*&), void(*send)(request), int delay);
+	//»нициализировать потоки
+	void Initialize();
 #endif
 };
