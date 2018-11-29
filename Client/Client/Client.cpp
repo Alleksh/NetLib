@@ -1,4 +1,4 @@
-#include "NetLib.h"
+#include "Client.h"
 void Response::SourceToMap(std::string& source, std::map<std::string, std::string>& Map)
 {
 	size_t i = 0;
@@ -21,105 +21,120 @@ void Response::SourceToMap(std::string& source, std::map<std::string, std::strin
 }
 NET::NET(std::string IP, std::string PORT)
 {
-	int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
-	if (result != 0)
+	this->IP = IP;
+	this->PORT = PORT;
+	int iResult;
+	// Initialize Winsock
+	iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+	if (iResult != 0)
 	{
-		std::cerr << "WSAStartup failed: " << result << "\n";
-		throw "WSAStartup failed";
+		std::cerr << "WSAStartup error: " << iResult;
+		throw "WSAStartup error";
 		return;
 	}
+
+
+	// Initialize Winsock
+	iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+	if (iResult != 0)
+	{
+		std::cerr << "WSAStartup error: " << iResult;
+		throw "WSAStartup error";
+		return;
+	}
+
 	ZeroMemory(&hints, sizeof(hints));
-	hints.ai_family = AF_INET;
+	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
 	hints.ai_protocol = IPPROTO_TCP;
-	hints.ai_flags = AI_PASSIVE;
 
-
-	result = getaddrinfo(IP.c_str(), PORT.c_str(), &hints, &addr);
-	if (result != 0)
+}
+void sendRequest(
+	std::string IP,
+	std::string PORT,
+	struct addrinfo& hints,
+	struct addrinfo *&result, char*& recvbuf, char*& sendbuf)
+{
+	int iResult;
+	// Resolve the server address and port
+	iResult = getaddrinfo(IP.c_str(), PORT.c_str(), &hints, &result);
+	if (iResult != 0)
 	{
-		std::cerr << "getaddrinfo failed: " << result << "\n";
+		std::cerr << "getaddrinfo error: " << iResult;
 		WSACleanup();
-		throw "getaddrinfo failed";
+		throw "getaddrinfo error";
+		return;
+	}
+	SOCKET ConnectSocket;
+	// Attempt to connect to an address until one succeeds
+	for (struct addrinfo *ptr = result; ptr != NULL; ptr = ptr->ai_next)
+	{
+
+		// Create a SOCKET for connecting to server
+		ConnectSocket = socket(ptr->ai_family, ptr->ai_socktype,
+			ptr->ai_protocol);
+		if (ConnectSocket == INVALID_SOCKET)
+		{
+			std::cerr << "socket error: ";
+			WSACleanup();
+			throw "socket error";
+			return;
+		}
+
+		// Connect to server.
+		iResult = connect(ConnectSocket, ptr->ai_addr, (int)ptr->ai_addrlen);
+		if (iResult == SOCKET_ERROR)
+		{
+			closesocket(ConnectSocket);
+			ConnectSocket = INVALID_SOCKET;
+			continue;
+		}
+		break;
+	}
+	int recvbuflen = PACKAGE_SIZE;
+	recvbuf = new char[1024];
+	if (ConnectSocket == INVALID_SOCKET)
+	{
+		std::cerr << "Unable to connect to server!\n";
+		WSACleanup();
 		return;
 	}
 
-
-	listen_socket = socket(addr->ai_family, addr->ai_socktype,
-		addr->ai_protocol);
-	if (listen_socket == INVALID_SOCKET)
+	// Send an initial buffer
+	iResult = send(ConnectSocket, sendbuf, (int)strlen(sendbuf), 0);
+	if (iResult == SOCKET_ERROR)
 	{
-		std::cerr << "Error at socket: " << WSAGetLastError() << "\n";
-		freeaddrinfo(addr);
-		WSACleanup();
-		throw "error at socket.";
-		return;
-	}
-
-	result = bind(listen_socket, addr->ai_addr, (int)addr->ai_addrlen);
-
-	if (result == SOCKET_ERROR)
-	{
-		std::cerr << "bind failed with error: " << WSAGetLastError() << "\n";
-		freeaddrinfo(addr);
-		closesocket(listen_socket);
-		WSACleanup();
-		throw "socket bind failed";
-		return;
-	}
-
-	if (listen(listen_socket, SOMAXCONN) == SOCKET_ERROR)
-	{
-		std::cerr << "listen failed with error: " << WSAGetLastError() << "\n";
-		closesocket(listen_socket);
+		printf("send failed with error: %d\n", WSAGetLastError());
+		closesocket(ConnectSocket);
 		WSACleanup();
 		return;
 	}
+
+	// shutdown the connection since no more data will be sent
+	iResult = shutdown(ConnectSocket, SD_SEND);
+	if (iResult == SOCKET_ERROR) {
+		printf("shutdown failed with error: %d\n", WSAGetLastError());
+		closesocket(ConnectSocket);
+		WSACleanup();
+		return;
 	}
 
-#ifdef SERVER
-void ProcessThread(
-	std::vector<HeaderAndResponse> &AutoResponses,
-	std::vector<std::pair<HeaderAndResponse, void(*)(char*&, char*)>> &AutoGetResponses,
-	bool &closeThread)
-{
-	while (1)
-	{
-		std::this_thread::sleep_for(std::chrono::seconds(1));
-		std::cout << "Hello, world\n";
-	}
-}
-void NET::addAutoResponse(std::string header, Response response)
-{
-	AutoResponses.push_back(HeaderAndResponse(header, response));
-}
-void NET::addAutoGetResponse(std::string header, Response response, void(*getFunc)(char*&, char*))
-{
-	AutoGetResponses.push_back(std::pair<HeaderAndResponse, void(*)(char*&, char*)>(HeaderAndResponse(header, response), getFunc));
-}
-void NET::Initialize()
-{
-	thread = new std::thread(ProcessThread, std::ref(AutoResponses), std::ref(AutoGetResponses), std::ref(closeThread));
-}
-NET::~NET()
-{
-	closeThread = 1;
-	std::this_thread::sleep_for(std::chrono::milliseconds(250));
-}
-#else
-
-void sendRequest(char*& recvdest, char*& send)
-{
-	recvdest = new char[1024];
-	memcpy(recvdest, std::string("123:123").c_str(), 8);
-	recvdest[8] = 0;
+	// Receive until the peer closes the connection
+	do {
+		iResult = recv(ConnectSocket, recvbuf, recvbuflen, 0);
+	} while (iResult > 0);
+	closesocket(ConnectSocket);
 }
 void AutoSendFunc(
+	std::string IP,
+	std::string PORT,
+	struct addrinfo& hints,
+	struct addrinfo *&result,
 	int& CloseThreads,
 	char* Request,
 	int delay,
 	void(*ProcessFunc)(Response),
-	void(*sendRequest)(char*&, char*&))
+	SEND_REQUEST_MACRO)
 {
 	while (CloseThreads != 0)
 	{
@@ -127,7 +142,7 @@ void AutoSendFunc(
 			std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
 		char* ptr;
-		sendRequest(ptr, Request);
+		sendRequest(IP, PORT, hints,result, ptr, Request);
 		ProcessFunc(Response(std::string(ptr)));
 		std::this_thread::sleep_for(std::chrono::milliseconds(delay));
 		delete ptr;
@@ -136,11 +151,15 @@ void AutoSendFunc(
 	CloseThreads = 3;
 }
 void GetSendAutoFunc(
+	std::string IP,
+	std::string PORT,
+	struct addrinfo& hints,
+	struct addrinfo *&result,
 	int& CloseThreads,
 	int delay,
 	void(*getFunc)(char*&),
 	void(*ProcessFunc)(Response),
-	void(*sendRequest)(char*&, char*&))
+	SEND_REQUEST_MACRO)
 {
 	if (ProcessFunc != NULL)
 	{
@@ -152,7 +171,7 @@ void GetSendAutoFunc(
 
 			char *ptr, *ptr2;
 			getFunc(ptr2);
-			sendRequest(ptr, ptr2);
+			sendRequest(IP, PORT, hints,result, ptr, ptr2);
 			ProcessFunc(Response(std::string(ptr)));
 			delete ptr;
 			delete ptr2;
@@ -167,7 +186,7 @@ void GetSendAutoFunc(
 
 			char *ptr, *ptr2;
 			getFunc(ptr2);
-			sendRequest(ptr, ptr2);
+			sendRequest(IP, PORT, hints,result, ptr, ptr2);
 			std::this_thread::sleep_for(std::chrono::milliseconds(delay));
 			delete ptr;
 			delete ptr2;
@@ -180,22 +199,22 @@ ID NET::addSendAutoFunc(std::string Request, void(*func)(Response), int delay)
 {
 	RequestStruct str;
 	str.TI.myItr = Requests.size();
-	str.TI.delFunc = &(this->deleteRequestsElement);
+	//str.TI.delFunc = &(this->deleteRequestsElement);
 	str.Request = Request;
 	str.func = func;
 	str.delay = delay;
 	Requests.push_back(str);
-	return ID(Requests.size()-1);
+	return ID(Requests.size() - 1);
 }
 ID NET::addGetSendAutoFunc(void(*get)(char*&), void(*send)(Response), int delay)
 {
 	GSRequestStruct str;
 	str.TI.myItr = GSRequests.size();
-	str.TI.delFunc = &deleteGSRequestsElement;
+	//str.TI.delFunc = &deleteGSRequestsElement;
 	str.getFunc = get;
 	str.sendFunc = send;
 	str.delay = delay;
-	if(1)
+	if (1)
 	{
 		GSRequests.push_back(str);
 	}
@@ -213,6 +232,10 @@ void NET::Initialize()
 		std::thread thread
 		(
 			AutoSendFunc,
+			IP,
+			PORT,
+			std::ref(hints),
+			std::ref(result),
 			std::ref(Requests[i].TI.ptr),
 			Response,
 			Requests[i].delay,
@@ -226,6 +249,10 @@ void NET::Initialize()
 		std::thread thread
 		(
 			GetSendAutoFunc,
+			IP,
+			PORT,
+			std::ref(hints),
+			std::ref(result),
 			std::ref(GSRequests[i].TI.ptr),
 			GSRequests[i].delay,
 			GSRequests[i].getFunc,
@@ -260,4 +287,3 @@ void NET::deleteGSRequestsElement(size_t _Val)
 		GSRequests[i].TI.myItr = i;// or Requests[i].TI.myItr--;
 	GSRequestsMutex.unlock();
 }
-#endif
