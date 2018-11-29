@@ -5,14 +5,16 @@ void getFunc(char*& dest)
 	memcpy(dest, std::string("getFunc").c_str(), 8);
 	dest[8] = 0;
 }
-void sendFunc(request req)
+void sendFunc(Response req)
 {
-	std::cout << req.Map.begin()->second << std::endl;
 }
 int main()
 {
-	NET net;
-	net.addGetSendAutoFunc(getFunc, sendFunc, 1000);
+	NET net("localhost","27015");
+	for(int i=0;i<1000;i++)
+	net.addGetSendAutoFunc(getFunc,sendFunc,50);
 	net.Initialize();
+	std::this_thread::sleep_for(std::chrono::seconds(5));
+	for (int i = 0; i < 1000; i++) net.GetThreadInteractionByID(ID(i,ID::GSRequest))->close();
 	std::this_thread::sleep_for(std::chrono::hours(1));
 }
