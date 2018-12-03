@@ -10,7 +10,7 @@
 #pragma comment(lib, "Ws2_32.lib")
 
 #define PACKAGE_SIZE 1024
-#define SEND_REQUEST_MACRO void (*sendRequest)(std::string IP,std::string PORT,struct addrinfo& hints,struct addrinfo *&result, char*&, char*&)
+#define SEND_REQUEST_MACRO bool (*sendRequest)(std::string IP,std::string PORT,struct addrinfo& hints,struct addrinfo *&result, char*&, char*&)
 struct Response
 {
 	std::string source;
@@ -46,8 +46,9 @@ void GetSendAutoFunc(
 struct ThreadInteraction
 {
 public:
-	int ptr = 1, myItr;
-	//std::function<void(size_t)> delFunc;
+	int ptr = 1;
+	size_t myItr;
+	std::function<void(size_t)> delFunc;
 	ThreadInteraction() {}
 	void pause()
 	{
@@ -60,7 +61,7 @@ public:
 	void close()
 	{
 		ptr = 0;
-		//std::invoke(delFunc, myItr);
+		delFunc(myItr);
 	}
 	int state()
 	{
@@ -82,32 +83,30 @@ struct GSRequestStruct
 	void(*sendFunc)(Response);
 	int delay;
 	GSRequestStruct() {}
-}; void sendRequest(
+}; bool sendRequest(
 	std::string IP,
 	std::string PORT,
 	struct addrinfo& hints,
 	struct addrinfo *&result, char*& recvbuf, char*& sendbuf);
-struct ID
-{
-	size_t id;
-	enum Type { GSRequest, Request } type = Request;
-	ID(size_t id, Type t = Request)
-	{
-		this->id = id;
-		type = t;
-	}
-};
 class NET
 {
 public:
-	NET(std::string IP, std::string PORT);
+	NET(std::string, std::string, size_t, size_t);
 	~NET()
 	{
+		for (int i = 0; i < Requests.size(); i++)
+		{
+			Requests[i].TI.close();
+		}
+		for (int i = 0; i < GSRequests.size(); i++)
+		{
+			GSRequests[i].TI.close();
+		}
+		WSACleanup();
 	}
-	ID addSendAutoFunc(std::string Request, void(*func)(Response), int delay);
-	ID addGetSendAutoFunc(void(*get)(char*&), void(*send)(Response), int delay);
+	ThreadInteraction* addSendAutoFunc(std::string Request, void(*func)(Response), int delay);
+	ThreadInteraction* addGetSendAutoFunc(void(*get)(char*&), void(*send)(Response), int delay);
 	void Initialize();
-	ThreadInteraction* GetThreadInteractionByID(ID id);
 	void __fastcall deleteRequestsElement(size_t _Val);
 	void __fastcall deleteGSRequestsElement(size_t _Val);
 private:

@@ -19,8 +19,10 @@ void Response::SourceToMap(std::string& source, std::map<std::string, std::strin
 		Map.emplace(pair.first, pair.second);
 	}
 }
-NET::NET(std::string IP, std::string PORT)
+NET::NET(std::string IP, std::string PORT, size_t FixedRequestsSize, size_t FixedGSRequestsSize)
 {
+	Requests.reserve(FixedRequestsSize);
+	GSRequests.reserve(FixedGSRequestsSize);
 	this->IP = IP;
 	this->PORT = PORT;
 	int iResult;
@@ -48,22 +50,31 @@ NET::NET(std::string IP, std::string PORT)
 	hints.ai_socktype = SOCK_STREAM;
 	hints.ai_protocol = IPPROTO_TCP;
 
-}
-void sendRequest(
-	std::string IP,
-	std::string PORT,
-	struct addrinfo& hints,
-	struct addrinfo *&result, char*& recvbuf, char*& sendbuf)
-{
-	int iResult;
 	// Resolve the server address and port
 	iResult = getaddrinfo(IP.c_str(), PORT.c_str(), &hints, &result);
 	if (iResult != 0)
 	{
 		std::cerr << "getaddrinfo error: " << iResult;
 		WSACleanup();
-		throw "getaddrinfo error";
+		throw "SERVER_NOT_FINDED";
 		return;
+	}
+}
+bool sendRequest(
+	std::string IP,
+	std::string PORT,
+	struct addrinfo& hints,
+	struct addrinfo *&result, char*& recvbuf, char*& sendbuf)
+{
+	int iResult;
+	recvbuf = new char[1024];
+	// Resolve the server address and port
+	iResult = getaddrinfo(IP.c_str(), PORT.c_str(), &hints, &result);
+	if (iResult != 0)
+	{
+		std::cerr << "getaddrinfo error: " << iResult;
+		WSACleanup();
+		return 0;
 	}
 	SOCKET ConnectSocket;
 	// Attempt to connect to an address until one succeeds
@@ -77,8 +88,7 @@ void sendRequest(
 		{
 			std::cerr << "socket error: ";
 			WSACleanup();
-			throw "socket error";
-			return;
+			return 0;
 		}
 
 		// Connect to server.
@@ -91,13 +101,11 @@ void sendRequest(
 		}
 		break;
 	}
-	int recvbuflen = PACKAGE_SIZE;
-	recvbuf = new char[1024];
 	if (ConnectSocket == INVALID_SOCKET)
 	{
 		std::cerr << "Unable to connect to server!\n";
 		WSACleanup();
-		return;
+		return 0;
 	}
 
 	// Send an initial buffer
@@ -107,7 +115,7 @@ void sendRequest(
 		printf("send failed with error: %d\n", WSAGetLastError());
 		closesocket(ConnectSocket);
 		WSACleanup();
-		return;
+		return 0;
 	}
 
 	// shutdown the connection since no more data will be sent
@@ -116,14 +124,15 @@ void sendRequest(
 		printf("shutdown failed with error: %d\n", WSAGetLastError());
 		closesocket(ConnectSocket);
 		WSACleanup();
-		return;
+		return 0;
 	}
 
 	// Receive until the peer closes the connection
 	do {
-		iResult = recv(ConnectSocket, recvbuf, recvbuflen, 0);
+		iResult = recv(ConnectSocket, recvbuf, PACKAGE_SIZE, 0);
 	} while (iResult > 0);
 	closesocket(ConnectSocket);
+	return 1;
 }
 void AutoSendFunc(
 	std::string IP,
@@ -171,7 +180,12 @@ void GetSendAutoFunc(
 
 			char *ptr, *ptr2;
 			getFunc(ptr2);
-			sendRequest(IP, PORT, hints,result, ptr, ptr2);
+			if(!sendRequest(IP, PORT, hints, result, ptr, ptr2))
+			{
+				delete ptr;
+				delete ptr2;
+				return;
+			}
 			ProcessFunc(Response(std::string(ptr)));
 			delete ptr;
 			delete ptr2;
@@ -195,22 +209,22 @@ void GetSendAutoFunc(
 	CloseThreads = 3;
 }
 
-ID NET::addSendAutoFunc(std::string Request, void(*func)(Response), int delay)
+ThreadInteraction* NET::addSendAutoFunc(std::string Request, void(*func)(Response), int delay)
 {
 	RequestStruct str;
 	str.TI.myItr = Requests.size();
-	//str.TI.delFunc = &(this->deleteRequestsElement);
+	str.TI.delFunc = std::bind(&NET::deleteRequestsElement, this, std::placeholders::_1);
 	str.Request = Request;
 	str.func = func;
 	str.delay = delay;
 	Requests.push_back(str);
-	return ID(Requests.size() - 1);
+	return &Requests[Requests.size() - 1].TI;
 }
-ID NET::addGetSendAutoFunc(void(*get)(char*&), void(*send)(Response), int delay)
+ThreadInteraction* NET::addGetSendAutoFunc(void(*get)(char*&), void(*send)(Response), int delay)
 {
 	GSRequestStruct str;
 	str.TI.myItr = GSRequests.size();
-	//str.TI.delFunc = &deleteGSRequestsElement;
+	str.TI.delFunc = std::bind(&NET::deleteGSRequestsElement, this, std::placeholders::_1);
 	str.getFunc = get;
 	str.sendFunc = send;
 	str.delay = delay;
@@ -218,7 +232,7 @@ ID NET::addGetSendAutoFunc(void(*get)(char*&), void(*send)(Response), int delay)
 	{
 		GSRequests.push_back(str);
 	}
-	return ID(Requests.size() - 1, ID::GSRequest);
+	return &GSRequests[GSRequests.size() - 1].TI;
 }
 
 void NET::Initialize()
@@ -262,13 +276,6 @@ void NET::Initialize()
 		thread.detach();
 	}
 }
-ThreadInteraction* NET::GetThreadInteractionByID(ID id)
-{
-	if (id.type == ID::Request)
-		return &Requests[id.id].TI;
-	else
-		return &GSRequests[id.id].TI;
-}
 void NET::deleteRequestsElement(size_t _Val)
 {
 	if (_Val >= Requests.size()) return;
@@ -283,7 +290,7 @@ void NET::deleteGSRequestsElement(size_t _Val)
 	if (_Val >= GSRequests.size()) return;
 	GSRequestsMutex.lock();
 	GSRequests.erase(GSRequests.begin() + _Val);
-	for (size_t i = _Val; i < Requests.size(); i++)
-		GSRequests[i].TI.myItr = i;// or Requests[i].TI.myItr--;
+	for (size_t i = 0; i < GSRequests.size(); i++)
+		GSRequests[i].TI.myItr=i;// or Requests[i].TI.myItr--;
 	GSRequestsMutex.unlock();
 }
